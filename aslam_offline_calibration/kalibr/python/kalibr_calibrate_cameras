@@ -20,7 +20,7 @@ import argparse
 import sys
 import random
 import signal
-
+import pickle
 np.set_printoptions(suppress=True)
 
 def initBagDataset(bagfile, topic, from_to, freq):
@@ -80,7 +80,6 @@ def parseArgs():
             
     parser = KalibrArgParser(description='Calibrate the intrinsics and extrinsics of a camera system with non-shared overlapping field of view.', usage=usage)
     parser.add_argument('--models', nargs='+', dest='models', help='The camera model {0} to estimate'.format(list(cameraModels.keys())), required=True)
-    
     groupSource = parser.add_argument_group('Data source')
     groupSource.add_argument('--bag', dest='bagfile', help='The bag file with the data')
     groupSource.add_argument('--topics', nargs='+', dest='topics', help='The list of image topics', required=True)
@@ -89,15 +88,16 @@ def parseArgs():
 
     groupTarget = parser.add_argument_group('Calibration target configuration')
     groupTarget.add_argument('--target', dest='targetYaml', help='Calibration target configuration as yaml file', required=True)
-    
+
     groupTarget = parser.add_argument_group('Image synchronization')
     groupTarget.add_argument('--approx-sync', dest='max_delta_approxsync', type=float, default=0.02, help='Time tolerance for approximate image synchronization [s] (default: %(default)s)')
-    
+
     groupCalibrator = parser.add_argument_group('Calibrator settings')
     groupCalibrator.add_argument('--qr-tol', type=float, default=0.02, dest='qrTol', help='The tolerance on the factors of the QR decomposition (default: %(default)s)')
     groupCalibrator.add_argument('--mi-tol', type=float, default=0.2, dest='miTol', help='The tolerance on the mutual information for adding an image. Higher means fewer images will be added. Use -1 to force all images. (default: %(default)s)')
     groupCalibrator.add_argument('--no-shuffle', action='store_true', dest='noShuffle', help='Do not shuffle the dataset processing order')
-    
+    groupCalibrator.add_argument('--custom-intrinsics', type=str, dest='params_pkl', help='pickle file that has the pre-initialized intrinsics')
+
     outlierSettings = parser.add_argument_group('Outlier filtering options')
     outlierSettings.add_argument('--no-outliers-removal', action='store_false', default=True, dest='removeOutliers', help='Disable corner outlier filtering')
     outlierSettings.add_argument('--no-final-filtering', action='store_false', default=True, dest='allowEndFiltering', help='Disable filtering after all views have been processed.')
@@ -106,6 +106,7 @@ def parseArgs():
     outlierSettings.add_argument('--plot-outliers', action='store_true', dest='doPlotOutliers', help='Plot the detect outliers during extraction (this could be slow)')
     
     outputSettings = parser.add_argument_group('Output options')
+    outputSettings.add_argument("--tag", type=str, dest="tag")
     outputSettings.add_argument('--verbose', action='store_true', dest='verbose', help='Enable (really) verbose output (disables plots)')
     outputSettings.add_argument('--show-extraction', action='store_true', dest='showextraction', help='Show the calibration target extraction. (disables plots)')
     outputSettings.add_argument('--plot', action='store_true', dest='plot', help='Plot during calibration (this could be slow).')
@@ -214,25 +215,27 @@ def main():
     while True:
         try:
             #compute initial guesses for the baselines, intrinsics
-            print("initializing initial guesses")
+            #print("initializing initial guesses")
             if len(cameraList)>1:
                 baseline_guesses = graph.getInitialGuesses(cameraList)
             else:
                 baseline_guesses=[]
-                
             if parsed.verbose and len(cameraList)>1:
                 graph.plotGraph()
 
             for baseline_idx, baseline in enumerate(baseline_guesses):
                 print("initialized baseline between cam{0} and cam{1} to:".format(baseline_idx, baseline_idx+1))
                 print(baseline.T())
-                
             for cam_idx, cam in enumerate(cameraList):
                 print("initialized cam{0} to:".format(cam_idx))
                 print("\t projection cam{0}: {1}".format(cam_idx, cam.geometry.projection().getParameters().flatten()))
                 print("\t distortion cam{0}: {1}".format(cam_idx, cam.geometry.projection().distortion().getParameters().flatten()))
-                
-
+                params = pickle.load(open(parsed.params_pkl, "rb"))
+                camera_name = parsed.topics[cam_idx].split("/")[1].replace("cam_", "")
+                projection_parameters = params[camera_name]["intrinsics"]
+                distortion_parameters = params[camera_name]["distortion_coeffs"]
+                cameraList[cam_idx].geometry.projection().setParameters(np.array(projection_parameters))
+                cameraList[cam_idx].geometry.projection().distortion().setParameters(np.array(distortion_parameters))
             print("initializing calibrator")
             calibrator = kcc.CameraCalibration(cameraList, baseline_guesses, verbose=parsed.verbose, useBlakeZissermanMest=parsed.doBlakeZisserman)
             options = calibrator.estimator.getOptions()
@@ -409,6 +412,7 @@ def main():
             
             #write to file
             bagtag = os.path.splitext(parsed.bagfile)[0]
+            bagtag = parsed.tag
             resultFile = bagtag + "-camchain.yaml"
             kcc.saveChainParametersYaml(calibrator, resultFile, graph)
             print("Results written to:")
